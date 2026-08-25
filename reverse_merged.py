@@ -2,7 +2,7 @@
 """
 Reverse merged flow (self-contained, high-concurrency):
   Phase 1: Google login  ->  TOTP / Authenticator (2FA) setup
-  Phase 2: SAME tab  ->  OAuth authorization URL  ->  pick account  ->  Continue  ->  Allow
+  Phase 2: SAME tab  ->  Instantly OAuth URL  ->  pick account  ->  Continue  ->  Allow
 
 Processes MANY accounts in parallel, each in its own isolated browser session.
 The flow steps are identical to the validated single-account run; only the
@@ -41,30 +41,23 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # ---------------------------------------------------------------------------
-# Configuration
-#
-# All credentials and service endpoints are supplied via environment variables
-# (see .env.example). Nothing sensitive is committed to source control.
+# Config
 # ---------------------------------------------------------------------------
-# OAuth provider (returns the authorization URL)
-OAUTH_API_KEY = os.getenv("OAUTH_API_KEY", "").strip()
-OAUTH_INIT_URL = os.getenv("OAUTH_INIT_URL", "").strip()
-OAUTH_INTERNAL_KEY = os.getenv("OAUTH_INTERNAL_KEY", "").strip()
-# Host the provider redirects back to on a successful grant (e.g. "example.com")
-OAUTH_REDIRECT_HOST = os.getenv("OAUTH_REDIRECT_HOST", "").strip().lower()
+INSTANTLY_API_KEY = os.getenv(
+    "INSTANTLY_API_KEY",
+    "",
+).strip()
+INSTANTLY_OAUTH_INIT = "https://api.instantly.ai/api/v2/oauth/google/init"
+INSTANTLY_DFY_KEY = os.getenv("INSTANTLY_DFY_KEY", "")
 
-# TOTP service (stores/reads authenticator secrets, returns current codes)
-TOTP_API_URL = os.getenv("TOTP_API_URL", "").rstrip("/")
-TOTP_API_KEY = os.getenv("TOTP_API_KEY", "").strip()
+TOTP_API_URL = "https://appapi.atozemails.com"
+TOTP_API_KEY = os.getenv("TOTP_API_KEY", "")
 
-# Optional result reporting (skipped automatically if not configured)
-REPORT_DB_URL = os.getenv("REPORT_DB_URL", "").rstrip("/")
-REPORT_DB_KEY = os.getenv("REPORT_DB_KEY", "").strip()
+# Supabase (result reporting into automation_logs.2fa / 2fa_raw_logs, keyed by domain)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-AUTHENTICATOR_URL = os.getenv(
-    "AUTHENTICATOR_URL",
-    "https://myaccount.google.com/two-step-verification/authenticator",
-)
+AUTHENTICATOR_URL = "https://myaccount.google.com/two-step-verification/authenticator"
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reverse_merged.log")
 
 # Concurrency: tuned to run up to 100 accounts in parallel, smoothly.
@@ -154,8 +147,8 @@ def _create_driver(user_data_dir, port):
 # ---------------------------------------------------------------------------
 _log_lock = threading.Lock()
 
-# One OAuth URL is fetched from the OAuth provider and shared across workers (cached).
-# The OAuth session expires ~10 min after init, so we refresh at < 2 min left.
+# One OAuth URL is fetched from Instantly and shared across workers (cached).
+# The Instantly session expires ~10 min after init, so we refresh at < 2 min left.
 _oauth_lock = threading.Lock()
 _oauth_cache = {"auth_url": None, "expires_at": 0.0}
 OAUTH_TTL_SECONDS = 8 * 60          # treat URL as valid for 8 min
@@ -165,7 +158,7 @@ OAUTH_REFRESH_MARGIN = 120          # refresh if < 2 min remaining
 _port_lock = threading.Lock()
 _next_port = {"value": 9600}
 
-# Per-domain locks so concurrent workers never overwrite the same report row.
+# Per-domain locks so concurrent workers never overwrite the same Supabase row.
 _domain_locks = {}
 _domain_locks_mutex = threading.Lock()
 
@@ -368,18 +361,18 @@ def mark_2fa_added(email, api_url=TOTP_API_URL, api_key=TOTP_API_KEY):
 
 def _fetch_oauth_url_raw():
     headers = {
-        "Authorization": f"Bearer {OAUTH_API_KEY}",
+        "Authorization": f"Bearer {INSTANTLY_API_KEY}",
         "Content-Type": "application/json",
-        "x-dfy-internal-api-key": OAUTH_INTERNAL_KEY,
+        "x-dfy-internal-api-key": INSTANTLY_DFY_KEY,
     }
     last_err = None
     for attempt in range(5):
         try:
-            r = requests.post(OAUTH_INIT_URL, json={}, headers=headers, timeout=20)
+            r = requests.post(INSTANTLY_OAUTH_INIT, json={}, headers=headers, timeout=20)
             r.raise_for_status()
             url = r.json().get("auth_url")
             if not url:
-                raise Exception("auth_url missing in OAuth API response")
+                raise Exception("auth_url missing in Instantly API response")
             return url
         except Exception as e:
             last_err = e
@@ -402,28 +395,25 @@ def get_oauth_url():
 
 
 # ---------------------------------------------------------------------------
-# Result reporter (thread-safe, per-domain)
+# Supabase result reporter (thread-safe, per-domain)
 # ---------------------------------------------------------------------------
-def report_result(email, success):
+def update_supabase_2fa(email, success):
     """
     Append this user's result to 2fa_raw_logs array for the domain row.
     Set 2fa = 'Done' only if every entry in the array is Success, else 'Failed'.
     Per-domain lock so concurrent workers never overwrite each other.
-    Skipped automatically when the report store is not configured.
     """
-    if not REPORT_DB_URL or not REPORT_DB_KEY:
-        return
     try:
         domain = email.split("@")[-1].strip().lower()
-        row_url = f"{REPORT_DB_URL}/rest/v1/automation_logs?domain=eq.{domain}"
+        row_url = f"{SUPABASE_URL}/rest/v1/automation_logs?domain=eq.{domain}"
         headers_read = {
-            "apikey": REPORT_DB_KEY,
-            "Authorization": f"Bearer {REPORT_DB_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
             "Accept": "application/json",
         }
         headers_write = {
-            "apikey": REPORT_DB_KEY,
-            "Authorization": f"Bearer {REPORT_DB_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         }
@@ -441,7 +431,7 @@ def report_result(email, success):
                     elif isinstance(existing, dict):
                         current_array = [existing]
             else:
-                print(f"[{_tname()}][report] GET failed domain={domain} HTTP {get_resp.status_code}")
+                print(f"[{_tname()}][Supabase] GET failed domain={domain} HTTP {get_resp.status_code}")
 
             current_array.append({"email": email, "status": "Success" if success else "Failed"})
             all_success = all(e.get("status") == "Success" for e in current_array)
@@ -454,11 +444,11 @@ def report_result(email, success):
                 timeout=15,
             )
             if patch_resp.status_code in (200, 204):
-                log_event("REPORT", email, f"domain={domain} | 2fa={fa_status} | entries={len(current_array)}")
+                log_event("SUPABASE", email, f"domain={domain} | 2fa={fa_status} | entries={len(current_array)}")
             else:
-                log_event("REPORT_ERR", email, f"domain={domain} | HTTP {patch_resp.status_code}")
+                log_event("SUPABASE_ERR", email, f"domain={domain} | HTTP {patch_resp.status_code}")
     except Exception as e:
-        log_event("REPORT_ERR", email, f"Exception: {e}")
+        log_event("SUPABASE_ERR", email, f"Exception: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -651,10 +641,10 @@ def setup_2fa(driver, email):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — same session -> OAuth   (flow identical to validated run)
+# Phase 2 — same session -> Instantly OAuth   (flow identical to validated run)
 # ---------------------------------------------------------------------------
-def authorize_oauth(driver, email):
-    log("P2-OAUTH", "Navigate to OAuth authorization URL, pick account, Continue + Allow (same session)")
+def authorize_instantly(driver, email):
+    log("P2-OAUTH", "Navigate to Instantly OAuth URL, pick account, Continue + Allow (same session)")
     auth_url = get_oauth_url()
     print(f"[{_tname()}][OAUTH] auth_url: {auth_url[:80]}...")
     driver.get(auth_url)
@@ -678,16 +668,15 @@ def authorize_oauth(driver, email):
     # 'I understand' (rare)
     try_click(driver, By.XPATH, '//input[@id="confirm"]', timeout=3)
 
-    # STEP 2 - Consent: click Continue / Allow until redirected back to the provider host
-    def _redirected_to_provider():
-        host = urlparse(driver.current_url).netloc.lower()
-        return bool(OAUTH_REDIRECT_HOST) and host.endswith(OAUTH_REDIRECT_HOST)
+    # STEP 2 - Consent: click Continue / Allow until redirected back to Instantly host
+    def _redirected_to_instantly():
+        return urlparse(driver.current_url).netloc.lower().endswith("instantly.ai")
 
     cont = False
     allow = False
     deadline = time.time() + 50
     while time.time() < deadline:
-        if _redirected_to_provider():
+        if _redirected_to_instantly():
             break
         if click_by_text(driver, "button", "Allow", timeout=2):
             allow = True
@@ -700,7 +689,7 @@ def authorize_oauth(driver, email):
         time.sleep(1.5)
 
     final_url = driver.current_url
-    granted = _redirected_to_provider()
+    granted = _redirected_to_instantly()
     print(f"[{_tname()}][OAUTH] continue={cont} allow={allow} | final_url={final_url}")
     log_event("OAUTH", email, f"continue={cont} allow={allow} granted={granted}")
     return {
@@ -757,14 +746,14 @@ def run_one(email, password, max_retries=10):
             # 2FA is confirmed done -> flag the account as 2FA-complete (idempotent)
             mark_2fa_added(email)
 
-            # PHASE 2 — same tab -> OAuth
-            r2 = authorize_oauth(driver, email)
+            # PHASE 2 — same tab -> Instantly OAuth
+            r2 = authorize_instantly(driver, email)
             print(f"[{_tname()}] PHASE2_RESULT:: {r2}")
             print(f"STATUS_EVENT::{email}::oauth_{r2.get('status')}::allow={r2.get('allow')}")
 
             duration = round(time.time() - start, 1)
             ok = r2.get("status") == "success"
-            report_result(email, success=ok)
+            update_supabase_2fa(email, success=ok)
             log_event("DONE" if ok else "PARTIAL", email, f"phase2={r2.get('status')} | {duration}s")
             return {"email": email, "phase1": r1, "phase2": r2,
                     "status": "success" if ok else "partial", "duration": duration}
@@ -778,7 +767,7 @@ def run_one(email, password, max_retries=10):
                 pass
             log_event("ERROR", email, f"attempt {attempt}: {e}")
             if attempt >= max_retries:
-                report_result(email, success=False)
+                update_supabase_2fa(email, success=False)
                 print(f"STATUS_EVENT::{email}::error::{e}")
                 return {"email": email, "status": "error", "error": str(e),
                         "duration": round(time.time() - start, 1)}

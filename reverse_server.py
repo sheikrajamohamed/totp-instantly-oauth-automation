@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Endpoint for the reverse-merge flow, an SSE trigger endpoint:
+Endpoint for the reverse-merge flow, matching the Instantly Trigger structure:
 
   POST /api/trigger   (header x-api-key)   -> SSE stream of per-account status events
   GET  /health                             -> {"status":"ok"}
@@ -14,7 +14,7 @@ SSE events (text/event-stream, `data: {json}\n\n`):
   {"status":"done", "total":N, "success":.., "partial":.., "error":..}   (once at the end)
 
 Reuses the hardened engine in reverse_merged.py (launch throttle, memory guard,
-challenge handling, 2FA mark, result logging).
+challenge handling, 2FA mark, Supabase logging).
 """
 import os
 import json
@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import reverse_merged as rm
 from flask import Flask, request, Response, jsonify
 
-# Auth + concurrency (configured via environment variables)
+# Auth + concurrency (matches the Trigger server's env style)
 API_KEY = os.getenv("API_KEY", "")
 DEFAULT_MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "100"))
 MAX_PARALLEL_CAP = int(os.getenv("MAX_PARALLEL_CAP", "100"))
