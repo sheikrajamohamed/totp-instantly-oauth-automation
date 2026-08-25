@@ -1,0 +1,8 @@
+seleniumbase
+undetected-chromedriver
+selenium
+pyzbar
+Pillow
+requests
+flask
+psutil

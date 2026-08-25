@@ -1,0 +1,14 @@
+# Secrets / config
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime artifacts
+*.log
+*.bak*
+screenshots/
+downloaded_files/
+accounts*.csv
