@@ -59,7 +59,8 @@ def trigger():
 
     mp = int(body.get("max_parallel_tabs") or body.get("max_parallel") or DEFAULT_MAX_PARALLEL)
     mp = max(1, min(mp, len(accounts), MAX_PARALLEL_CAP))
-    retries = int(body.get("max_retries", 10))
+    retries = max(1, min(int(body.get("max_retries", 5)), 5))
+    partner_portal = str(body.get("type", "")).strip().lower() == "partner_portal"
 
     def stream():
         rm.log_event("TRIGGERED", "-", f"accounts={len(accounts)} | max_parallel={mp}")
@@ -71,7 +72,7 @@ def trigger():
         counts = {"success": 0, "partial": 0, "error": 0}
         with ThreadPoolExecutor(max_workers=mp, thread_name_prefix="acct") as pool:
             # Launch throttle inside run_one caps concurrent browser starts; safe to submit all.
-            futures = {pool.submit(rm.run_one, a["email"], a["password"], retries): a["email"]
+            futures = {pool.submit(rm.run_one, a["email"], a["password"], retries, partner_portal): a["email"]
                        for a in accounts}
             for fut in as_completed(futures):
                 email = futures[fut]

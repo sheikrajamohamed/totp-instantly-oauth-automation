@@ -493,6 +493,51 @@ def handle_2fa_challenge(driver, email):
     return True
 
 
+def click_i_understand(driver, timeout=12):
+    """Workspace Terms-of-Service speedbump shown after the password step on an
+    account's first sign-in (accounts.google.com/v3/signin/speedbump/
+    workspacetermsofservice). Best-effort: scrolls the button into view and
+    clicks it. Returns True/False and never raises - accounts that already
+    accepted the terms simply have no button and are skipped."""
+    understand_btns = [
+        # New Material UI
+        '//*[@id="gaplustosNext"]//button',
+        '//button[@jsname="LgbsSe" and .//span[@jsname="V67aGc" and normalize-space()="I understand"]]',
+        '//button[.//span[normalize-space()="I understand"]]',
+        '//button[@jscontroller="soHxf" and .//span[normalize-space()="I understand"]]',
+        '//*[@jsname="Njthtb"]//button[.//span[normalize-space()="I understand"]]',
+        # Old input button
+        '//input[@id="confirm"]',
+        '//input[@name="confirm"]',
+        '//input[@value="I understand"]',
+        '//input[contains(@class, "MK9CEd") and @type="submit"]',
+        '//input[@type="submit" and contains(@value, "I understand")]',
+    ]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for xp in understand_btns:
+            try:
+                el = driver.find_element(By.XPATH, xp)
+            except Exception:
+                continue
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                time.sleep(0.4)
+                try:
+                    el.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", el)
+                print(f"[{_tname()}][TOS] clicked 'I understand' via {xp}")
+                time.sleep(random.uniform(2, 4))
+                print(f"[{_tname()}][TOS] URL after accept: {driver.current_url}")
+                return True
+            except Exception:
+                continue
+        time.sleep(1)
+    print(f"[{_tname()}][TOS] no 'I understand' found - skipping (already accepted)")
+    return False
+
+
 def login_google(driver, email, password):
     log("P1-LOGIN", f"Google login (email/password) for {email}")
     driver.get(AUTHENTICATOR_URL)
@@ -530,6 +575,8 @@ def login_google(driver, email, password):
             pw_el.send_keys(Keys.RETURN)
     time.sleep(random.uniform(5, 7))
     print(f"[{_tname()}] URL after password: {driver.current_url}")
+
+    click_i_understand(driver)  # ToS speedbump - optional, skips if absent
 
     # Already-enrolled accounts hit a 2-step code prompt here instead of the
     # setup page -> answer it from the stored secret and skip setup later.
@@ -643,7 +690,7 @@ def setup_2fa(driver, email):
 # ---------------------------------------------------------------------------
 # Phase 2 — same session -> Instantly OAuth   (flow identical to validated run)
 # ---------------------------------------------------------------------------
-def authorize_instantly(driver, email):
+def authorize_instantly(driver, email, partner_portal=False):
     log("P2-OAUTH", "Navigate to Instantly OAuth URL, pick account, Continue + Allow (same session)")
     auth_url = get_oauth_url()
     print(f"[{_tname()}][OAUTH] auth_url: {auth_url[:80]}...")
@@ -690,10 +737,14 @@ def authorize_instantly(driver, email):
 
     final_url = driver.current_url
     granted = _redirected_to_instantly()
-    print(f"[{_tname()}][OAUTH] continue={cont} allow={allow} | final_url={final_url}")
-    log_event("OAUTH", email, f"continue={cont} allow={allow} granted={granted}")
+    # partner_portal: skip the redirect-back QA verification. A completed
+    # consent (Allow clicked) is enough to count as success; non-partner
+    # runs still require the redirect-back confirmation.
+    qa_ok = granted or (partner_portal and allow)
+    print(f"[{_tname()}][OAUTH] continue={cont} allow={allow} granted={granted} partner={partner_portal} qa_ok={qa_ok} | final_url={final_url}")
+    log_event("OAUTH", email, f"continue={cont} allow={allow} granted={granted} partner={partner_portal}")
     return {
-        "status": "success" if granted else "partial",
+        "status": "success" if qa_ok else "partial",
         "email": email,
         "picked": bool(picked),
         "continue": cont,
@@ -705,7 +756,7 @@ def authorize_instantly(driver, email):
 # ---------------------------------------------------------------------------
 # Per-account worker (isolated browser)   flow identical to validated run
 # ---------------------------------------------------------------------------
-def run_one(email, password, max_retries=10):
+def run_one(email, password, max_retries=5, partner_portal=False):
     start = time.time()
     for attempt in range(1, max_retries + 1):
         user_data_dir = f"/tmp/rev_{os.getpid()}_{threading.get_ident()}_{random.randint(1000, 9999)}"
@@ -747,7 +798,7 @@ def run_one(email, password, max_retries=10):
             mark_2fa_added(email)
 
             # PHASE 2 — same tab -> Instantly OAuth
-            r2 = authorize_instantly(driver, email)
+            r2 = authorize_instantly(driver, email, partner_portal=partner_portal)
             print(f"[{_tname()}] PHASE2_RESULT:: {r2}")
             print(f"STATUS_EVENT::{email}::oauth_{r2.get('status')}::allow={r2.get('allow')}")
 
